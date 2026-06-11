@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+
+# Data & Notebooks
+data/
+.ipynb_checkpoints/
+FLOWER
+demo/flower_photos
+demo/flower_photos_test
+
+
+# Checkpoints
+# Lưu ý: Nếu ckpt.pth > 100MB thì nên dùng Git LFS. 
+# Với MobileNetV2 (~9MB) thì có thể đưa lên trực tiếp.
+# checkpoint/
