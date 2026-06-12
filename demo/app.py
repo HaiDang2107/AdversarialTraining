@@ -1,4 +1,5 @@
 import os
+import io
 # Ensure legacy Keras environment variable is set
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 
@@ -232,9 +233,35 @@ if uploaded_file is not None:
             with sub_col1:
                 st.markdown("**Adversarial Image**")
                 st.image(adv_pil, use_container_width=True)
+                
+                # Convert PIL to bytes for download
+                buf = io.BytesIO()
+                adv_pil.save(buf, format="PNG")
+                byte_im = buf.getvalue()
+                
+                st.download_button(
+                    label="💾 Download Adversarial Image",
+                    data=byte_im,
+                    file_name=f"adversarial_{attack_option}_{epsilon:.3f}.png",
+                    mime="image/png",
+                    use_container_width=True
+                )
             with sub_col2:
                 st.markdown("**Noise Map (Perturbation)**")
                 st.image(noise_pil, use_container_width=True)
+                
+                # Convert noise PIL to bytes for download
+                buf_noise = io.BytesIO()
+                noise_pil.save(buf_noise, format="PNG")
+                byte_noise = buf_noise.getvalue()
+                
+                st.download_button(
+                    label="💾 Download Noise Map",
+                    data=byte_noise,
+                    file_name=f"noise_{attack_option}_{epsilon:.3f}.png",
+                    mime="image/png",
+                    use_container_width=True
+                )
                 
             st.markdown("### Model Predictions after Attack")
             for model_name, (lbl, conf, color) in st.session_state.adv_results.items():
