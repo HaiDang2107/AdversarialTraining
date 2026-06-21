@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-evaluate_model_under_PGD_attack.py
+evaluate_mobilenetv2_under_attack.py
 
 Đánh giá mô hình phân loại hoa dưới cuộc tấn công FGSM hoặc PGD.
-Cho phép lựa chọn thuật toán tấn công và mô hình thông qua tham số dòng lệnh (terminal arguments).
+Hỗ trợ cả MobileNetV2 và ResNet50 thông qua tự động phát hiện tiền xử lý tương ứng.
 """
 
 import os
@@ -48,12 +48,21 @@ def load_model_by_name_or_path(model_input):
     """
     Tải mô hình phân loại hoa bằng tên hoặc đường dẫn đầy đủ.
     """
+    # Import the safe loader from models.py
+    try:
+        from models import load_keras_model_safely
+    except ImportError:
+        load_keras_model_safely = None
+
     # 1. Thử xem có phải đường dẫn file tồn tại trực tiếp không
     if os.path.exists(model_input):
         print(f"Đang tải mô hình từ đường dẫn trực tiếp: {model_input}...")
+        if load_keras_model_safely:
+            return load_keras_model_safely(model_input)
         return keras.models.load_model(
             model_input,
-            custom_objects={'KerasLayer': hub.KerasLayer}
+            custom_objects={'KerasLayer': hub.KerasLayer},
+            safe_mode=False
         )
     
     # 2. Thử tải thông qua models.py
@@ -68,14 +77,17 @@ def load_model_by_name_or_path(model_input):
     model_path = os.path.join(current_dir, model_input)
     if os.path.exists(model_path):
         print(f"Đang tải mô hình từ thư mục của script: {model_path}...")
+        if load_keras_model_safely:
+            return load_keras_model_safely(model_path)
         return keras.models.load_model(
             model_path,
-            custom_objects={'KerasLayer': hub.KerasLayer}
+            custom_objects={'KerasLayer': hub.KerasLayer},
+            safe_mode=False
         )
         
     raise FileNotFoundError(f"Không tìm thấy file mô hình '{model_input}' trong thư mục hiện tại hoặc thư mục demo/.")
 
-def evaluate_robustness(model, dataset, class_names, attack_type="PGD", epsilon=0.01, num_visualize=3, pgd_steps=10, pgd_alpha=0.0025):
+def evaluate_robustness(model, dataset, class_names, attack_type="PGD", epsilon=0.01, num_visualize=3, pgd_steps=10, pgd_alpha=0.0025, preprocess_fn=None):
     """
     Hàm đánh giá độ bền vững của mô hình và trực quan hóa kết quả dưới cuộc tấn công FGSM hoặc PGD.
     
@@ -88,6 +100,7 @@ def evaluate_robustness(model, dataset, class_names, attack_type="PGD", epsilon=
         num_visualize: Số lượng ví dụ muốn hiển thị ra biểu đồ.
         pgd_steps: Số bước lặp của PGD (chỉ dùng cho PGD).
         pgd_alpha: Step size của PGD (chỉ dùng cho PGD).
+        preprocess_fn: Hàm tiền xử lý động (chỉ dùng cho ResNet50 gốc).
     """
     clean_acc = tf.keras.metrics.CategoricalAccuracy()
     adv_acc = tf.keras.metrics.CategoricalAccuracy()
@@ -103,13 +116,15 @@ def evaluate_robustness(model, dataset, class_names, attack_type="PGD", epsilon=
     
     for x, y in dataset:
         # Nhớ để training=False để Dropout/BatchNorm không hoạt động sai
-        clean_preds = model(x, training=False) 
+        x_clean = preprocess_fn(x) if preprocess_fn is not None else x
+        clean_preds = model(x_clean, training=False) 
         clean_acc.update_state(y, clean_preds)
         
         if attack_type.upper() == "FGSM":
             with tf.GradientTape() as tape:
                 tape.watch(x)
-                preds = model(x, training=False)
+                x_prep = preprocess_fn(x) if preprocess_fn is not None else x
+                preds = model(x_prep, training=False)
                 loss = tf.keras.losses.CategoricalCrossentropy()(y, preds)
             
             grad = tape.gradient(loss, x)
@@ -125,7 +140,8 @@ def evaluate_robustness(model, dataset, class_names, attack_type="PGD", epsilon=
             for _ in range(pgd_steps):
                 with tf.GradientTape() as tape:
                     tape.watch(x_adv)
-                    preds = model(x_adv, training=False)
+                    x_adv_prep = preprocess_fn(x_adv) if preprocess_fn is not None else x_adv
+                    preds = model(x_adv_prep, training=False)
                     loss = tf.keras.losses.CategoricalCrossentropy()(y, preds)
                 
                 grad = tape.gradient(loss, x_adv)
@@ -138,7 +154,8 @@ def evaluate_robustness(model, dataset, class_names, attack_type="PGD", epsilon=
                 # Kẹp vào không gian màu hợp lệ [0, 1]
                 x_adv = tf.clip_by_value(x_adv, 0.0, 1.0)
         
-        adv_preds = model(x_adv, training=False)
+        x_adv_final = preprocess_fn(x_adv) if preprocess_fn is not None else x_adv
+        adv_preds = model(x_adv_final, training=False)
         adv_acc.update_state(y, adv_preds)
         
         # --- TÍNH TOÁN ATTACK SUCCESS RATE (ASR) ---
@@ -162,7 +179,14 @@ def evaluate_robustness(model, dataset, class_names, attack_type="PGD", epsilon=
                     viz_clean_imgs.append(x[i].numpy())
                     viz_adv_imgs.append(x_adv[i].numpy())
                     # viz_noises lưu lại hướng nhiễu (signed_grad)
-                    viz_noises.append(signed_grad[i].numpy())
+                    if attack_type.upper() == "FGSM":
+                        viz_noises.append(signed_grad[i].numpy())
+                    else:
+                        # Với PGD, nhiễu thực tế là (x_adv - x) được phóng đại để dễ quan sát
+                        diff = x_adv[i].numpy() - x[i].numpy()
+                        # Chuẩn hóa về khoảng [-1, 1] để đồng bộ với signed_grad
+                        max_diff = np.max(np.abs(diff))
+                        viz_noises.append(diff / max_diff if max_diff > 0 else diff)
                     
                     viz_clean_preds.append((clean_labels[i].numpy(), np.max(clean_preds[i].numpy())))
                     viz_adv_preds.append((adv_labels[i].numpy(), np.max(adv_preds[i].numpy())))
@@ -247,7 +271,7 @@ def main():
         "--model", "-m",
         type=str,
         default="my_flower_model_6e.keras",
-        help="Tên file mô hình (VD: my_flower_model_6e.keras, robust_flower_model_FGSM_100e.keras, robust_flower_model_PGD_200e.keras) hoặc đường dẫn file .keras. (Mặc định: my_flower_model_6e.keras)"
+        help="Tên file mô hình hoặc đường dẫn file .keras."
     )
     
     parser.add_argument(
@@ -275,7 +299,7 @@ def main():
         "--batch_size", "-b",
         type=int,
         default=16,
-        help="Batch size dùng khi tải dữ liệu. (Mặc định: 32)"
+        help="Batch size dùng khi tải dữ liệu. (Mặc định: 16)"
     )
     
     parser.add_argument(
@@ -313,7 +337,8 @@ def main():
             image_size=(224, 224),
             batch_size=args.batch_size,
             label_mode='categorical',
-            shuffle=False
+            shuffle=False,
+            interpolation='nearest'
         )
     except Exception as e:
         print(f"Lỗi tải tập dữ liệu: {e}")
@@ -321,10 +346,33 @@ def main():
         
     class_names = test_ds.class_names
     
-    # Chuẩn hóa giá trị pixel ảnh về khoảng [0, 1]
+    # Chuẩn hóa giá trị pixel ảnh về khoảng [0, 1] trước khi áp dụng tiền xử lý
     normalization_layer = tf.keras.layers.Rescaling(1./255)
     test_ds = test_ds.map(lambda x, y: (normalization_layer(x), y))
     
+    # Thiết lập hàm tiền xử lý (preprocess_fn) nếu là mô hình ResNet50 hoặc MobileNetV2 gốc/sạch
+    preprocess_fn = None
+    model_name_lower = os.path.basename(args.model).lower()
+    if "resnet50" in model_name_lower and "robust" not in model_name_lower:
+        print("Mô hình ResNet50 sạch được phát hiện. Áp dụng tiền xử lý ResNet50 (RGB -> BGR và trừ trung bình ImageNet) trong quá trình tấn công...")
+        def resnet_preprocess(x):
+            # Quy đổi ảnh từ [0, 1] sang [0, 255]
+            x_scaled = x * 255.0
+            # Tách các kênh màu RGB
+            r = x_scaled[..., 0]
+            g = x_scaled[..., 1]
+            b = x_scaled[..., 2]
+            # Trừ trung bình tập ImageNet (BGR): [103.939, 116.779, 123.68]
+            b_pre = b - 103.939
+            g_pre = g - 116.779
+            r_pre = r - 123.68
+            # Gộp lại thành ảnh BGR
+            return tf.stack([b_pre, g_pre, r_pre], axis=-1)
+        preprocess_fn = resnet_preprocess
+    elif "my_flower_model" in model_name_lower and "resnet" not in model_name_lower:
+        print("Mô hình MobileNetV2 sạch được phát hiện. Áp dụng tiền xử lý MobileNetV2 (scale về [-1, 1]) trong quá trình tấn công...")
+        preprocess_fn = lambda x: x * 2.0 - 1.0
+        
     # 3. Chạy đánh giá độ bền vững
     evaluate_robustness(
         model=model,
@@ -334,7 +382,8 @@ def main():
         epsilon=args.epsilon,
         num_visualize=args.num_visualize,
         pgd_steps=args.pgd_steps,
-        pgd_alpha=args.pgd_alpha
+        pgd_alpha=args.pgd_alpha,
+        preprocess_fn=preprocess_fn
     )
 
 if __name__ == "__main__":
