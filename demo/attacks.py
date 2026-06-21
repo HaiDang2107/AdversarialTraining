@@ -5,7 +5,7 @@ os.environ["TF_USE_LEGACY_KERAS"] = "1"
 import tensorflow as tf
 import numpy as np
 
-def fgsm_attack(model, input_image, label_idx, epsilon):
+def fgsm_attack(model, input_image, label_idx, epsilon, preprocess_fn=None):
     """
     Generates adversarial example using Fast Gradient Sign Method (FGSM).
     """
@@ -15,7 +15,8 @@ def fgsm_attack(model, input_image, label_idx, epsilon):
     
     with tf.GradientTape() as tape:
         tape.watch(input_image)
-        prediction = model(input_image)
+        model_input = preprocess_fn(input_image) if preprocess_fn is not None else input_image
+        prediction = model(model_input)
         loss = loss_object(label_tensor, prediction)
         
     gradient = tape.gradient(loss, input_image)
@@ -26,7 +27,7 @@ def fgsm_attack(model, input_image, label_idx, epsilon):
     
     return adv_x.numpy()
 
-def pgd_attack(model, input_image, label_idx, epsilon, max_iter, alpha):
+def pgd_attack(model, input_image, label_idx, epsilon, max_iter, alpha, preprocess_fn=None):
     """
     Generates adversarial example using Projected Gradient Descent (PGD).
     """
@@ -42,7 +43,8 @@ def pgd_attack(model, input_image, label_idx, epsilon, max_iter, alpha):
     for _ in range(max_iter):
         with tf.GradientTape() as tape:
             tape.watch(x_adv)
-            prediction = model(x_adv)
+            model_input = preprocess_fn(x_adv) if preprocess_fn is not None else x_adv
+            prediction = model(model_input)
             loss = loss_object(label_tensor, prediction)
             
         gradient = tape.gradient(loss, x_adv)
@@ -56,4 +58,5 @@ def pgd_attack(model, input_image, label_idx, epsilon, max_iter, alpha):
         x_adv = tf.clip_by_value(x_adv, 0.0, 1.0)
         
     return x_adv.numpy()
+
 

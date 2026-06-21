@@ -108,6 +108,9 @@ def evaluate_robustness(model, dataset, class_names, attack_type="PGD", epsilon=
     total_correct_clean = 0
     successful_attacks = 0
     
+    sum_conf_adv_correct = 0.0
+    count_adv_correct = 0
+    
     # Biến lưu trữ dữ liệu để vẽ biểu đồ
     viz_clean_imgs, viz_adv_imgs, viz_noises = [], [], []
     viz_clean_preds, viz_adv_preds, viz_true_labels = [], [], []
@@ -165,9 +168,15 @@ def evaluate_robustness(model, dataset, class_names, attack_type="PGD", epsilon=
         
         clean_correct = tf.equal(clean_labels, true_labels)
         adv_incorrect = tf.not_equal(adv_labels, true_labels)
+        adv_correct = tf.equal(adv_labels, true_labels)
         
         total_correct_clean += tf.reduce_sum(tf.cast(clean_correct, tf.int32)).numpy()
         successful_attacks += tf.reduce_sum(tf.cast(tf.logical_and(clean_correct, adv_incorrect), tf.int32)).numpy()
+        
+        # Calculate confidence for correct adversarial predictions
+        correct_confidences = tf.boolean_mask(tf.reduce_max(adv_preds, axis=1), adv_correct)
+        sum_conf_adv_correct += tf.reduce_sum(correct_confidences).numpy()
+        count_adv_correct += tf.shape(correct_confidences)[0].numpy()
         
         # --- LƯU LẠI VÍ DỤ ĐỂ VẼ BIỂU ĐỒ ---
         if len(viz_clean_imgs) < num_visualize:
@@ -196,6 +205,7 @@ def evaluate_robustness(model, dataset, class_names, attack_type="PGD", epsilon=
     c_acc = clean_acc.result().numpy() * 100
     a_acc = adv_acc.result().numpy() * 100
     asr = (successful_attacks / total_correct_clean * 100) if total_correct_clean > 0 else 0.0
+    avg_conf_adv_correct = (sum_conf_adv_correct / count_adv_correct * 100) if count_adv_correct > 0 else 0.0
 
     print("\n" + "="*50)
     print(f" BÁO CÁO ĐÁNH GIÁ ĐỘ BỀN VỮNG ({attack_type.upper()} ATTACK REPORT)")
@@ -208,6 +218,7 @@ def evaluate_robustness(model, dataset, class_names, attack_type="PGD", epsilon=
     print(f" 1. Standard Accuracy      : {c_acc:.2f}%  (Độ chính xác trên ảnh sạch)")
     print(f" 2. Robust Accuracy        : {a_acc:.2f}%  (Độ chính xác trên ảnh nhiễu)")
     print(f" 3. Attack Success Rate    : {asr:.2f}%  (Tỷ lệ đánh lừa mô hình thành công)")
+    print(f" 4. Avg Conf on Correct Adv: {avg_conf_adv_correct:.2f}%  (Độ tự tin TB trên ảnh nhiễu đoán đúng)")
     print("="*50)
 
     # --- VẼ BIỂU ĐỒ (DIAGRAMS) ---

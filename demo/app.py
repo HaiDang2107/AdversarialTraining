@@ -18,19 +18,42 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Caching model loading to optimize performance
-@st.cache_resource
-def load_all_models():
-    model_non_robust = load_flower_model('my_flower_model_6e.keras')
-    model_fgsm = load_flower_model('robust_flower_model_FGSM_100e.keras')
-    model_pgd = load_flower_model('robust_flower_model_PGD_200e.keras')
-    return model_non_robust, model_fgsm, model_pgd
+# Helper to determine preprocess function for a given model type
+def get_preprocess_fn(arch, model_type):
+    if arch == "MobileNetV2":
+        if model_type == "Non-Robust Model":
+            # Clean MobileNetV2 expects [-1, 1] input range
+            return lambda x: x * 2.0 - 1.0
+        else:
+            # Robust MobileNetV2 expects [0, 1] input range
+            return None
+    else:  # ResNet50
+        if model_type == "Non-Robust Model":
+            # Clean ResNet50 expects BGR and ImageNet mean subtraction
+            def resnet_preprocess(x):
+                x_scaled = x * 255.0
+                r = x_scaled[..., 0]
+                g = x_scaled[..., 1]
+                b = x_scaled[..., 2]
+                b_pre = b - 103.939
+                g_pre = g - 116.779
+                r_pre = r - 123.68
+                if isinstance(x, tf.Tensor):
+                    return tf.stack([b_pre, g_pre, r_pre], axis=-1)
+                else:
+                    return np.stack([b_pre, g_pre, r_pre], axis=-1)
+            return resnet_preprocess
+        else:
+            # Robust ResNet50 models have embedded lambda preprocessing layer, so they expect [0, 1]
+            return None
 
-try:
-    model_non_robust, model_fgsm, model_pgd = load_all_models()
-except Exception as e:
-    st.error(f"Error loading models. Please verify that all three model files exist in the 'demo/' directory. Details: {e}")
-    st.stop()
+# Helper to get preprocessed model input
+def get_model_input(img, arch, model_type):
+    fn = get_preprocess_fn(arch, model_type)
+    if fn is not None:
+        return fn(img)
+    return img
+
 
 # Helper for image preprocessing
 def preprocess_image(uploaded_file):
@@ -57,6 +80,30 @@ def make_prediction_card(model_name, label, confidence, color="#1f77b4"):
 st.sidebar.title("🛠️ Control Panel")
 uploaded_file = st.sidebar.file_uploader("Upload Flower Image", type=["png", "jpg", "jpeg"])
 
+architecture = st.sidebar.selectbox(
+    "Select Model Architecture",
+    ["MobileNetV2", "ResNet50"]
+)
+
+# Caching model loading to optimize performance
+@st.cache_resource
+def load_all_models(arch):
+    if arch == "MobileNetV2":
+        model_non_robust = load_flower_model('my_flower_model_mobilenetv2.keras')
+        model_fgsm = load_flower_model('robust_flower_model_mobilenetv2_FGSM_100e.keras')
+        model_pgd = load_flower_model('robust_flower_model_mobilenetv2_PGD_200e.keras')
+    else:  # ResNet50
+        model_non_robust = load_flower_model('my_flower_model_resnet50.keras')
+        model_fgsm = load_flower_model('robust_flower_model_resnet50_FGSM_150e.keras')
+        model_pgd = load_flower_model('robust_flower_model_resnet50_PGD_200e.keras')
+    return model_non_robust, model_fgsm, model_pgd
+
+try:
+    model_non_robust, model_fgsm, model_pgd = load_all_models(architecture)
+except Exception as e:
+    st.error(f"Error loading {architecture} models. Please verify that all three model files exist in the 'demo/' directory. Details: {e}")
+    st.stop()
+
 # Initialize session state variables
 if 'orig_classified' not in st.session_state:
     st.session_state.orig_classified = False
@@ -71,16 +118,19 @@ if 'noise_map' not in st.session_state:
 if 'adv_results' not in st.session_state:
     st.session_state.adv_results = None
 
-# Reset state if a new file is uploaded
+# Reset state if a new file is uploaded or architecture changes
 if uploaded_file is not None:
-    if 'current_file' not in st.session_state or st.session_state.current_file != uploaded_file.name:
+    if ('current_file' not in st.session_state or st.session_state.current_file != uploaded_file.name or
+        'current_arch' not in st.session_state or st.session_state.current_arch != architecture):
         st.session_state.current_file = uploaded_file.name
+        st.session_state.current_arch = architecture
         st.session_state.orig_classified = False
         st.session_state.orig_results = None
         st.session_state.adv_generated = False
         st.session_state.adv_image = None
         st.session_state.noise_map = None
         st.session_state.adv_results = None
+
 
 st.sidebar.subheader("⚔️ Attack Configuration")
 attack_option = st.sidebar.selectbox(
@@ -141,9 +191,9 @@ if uploaded_file is not None:
         if classify_button or st.session_state.orig_classified:
             if not st.session_state.orig_classified:
                 with st.spinner("Classifying..."):
-                    lbl_non, conf_non, _ = predict_image(model_non_robust, preprocessed_img)
-                    lbl_fgsm, conf_fgsm, _ = predict_image(model_fgsm, preprocessed_img)
-                    lbl_pgd, conf_pgd, _ = predict_image(model_pgd, preprocessed_img)
+                    lbl_non, conf_non, _ = predict_image(model_non_robust, get_model_input(preprocessed_img, architecture, "Non-Robust Model"))
+                    lbl_fgsm, conf_fgsm, _ = predict_image(model_fgsm, get_model_input(preprocessed_img, architecture, "FGSM-Robust Model"))
+                    lbl_pgd, conf_pgd, _ = predict_image(model_pgd, get_model_input(preprocessed_img, architecture, "PGD-Robust Model"))
                     
                     st.session_state.orig_results = {
                         "Non-Robust Model": (lbl_non, conf_non, "#6c757d"),
@@ -167,9 +217,9 @@ if uploaded_file is not None:
                 with st.spinner("Generating adversarial perturbation..."):
                     # Classify if not done to get predicted index
                     if not st.session_state.orig_classified:
-                        lbl_non, conf_non, _ = predict_image(model_non_robust, preprocessed_img)
-                        lbl_fgsm, conf_fgsm, _ = predict_image(model_fgsm, preprocessed_img)
-                        lbl_pgd, conf_pgd, _ = predict_image(model_pgd, preprocessed_img)
+                        lbl_non, conf_non, _ = predict_image(model_non_robust, get_model_input(preprocessed_img, architecture, "Non-Robust Model"))
+                        lbl_fgsm, conf_fgsm, _ = predict_image(model_fgsm, get_model_input(preprocessed_img, architecture, "FGSM-Robust Model"))
+                        lbl_pgd, conf_pgd, _ = predict_image(model_pgd, get_model_input(preprocessed_img, architecture, "PGD-Robust Model"))
                         st.session_state.orig_results = {
                             "Non-Robust Model": (lbl_non, conf_non, "#6c757d"),
                             "FGSM-Robust Model": (lbl_fgsm, conf_fgsm, "#fd7e14"),
@@ -190,18 +240,19 @@ if uploaded_file is not None:
                     label_idx = labels.index(orig_pred_label)
                     
                     # Attack execution using the selected model
+                    target_preprocess_fn = get_preprocess_fn(architecture, attack_model_option)
                     if attack_option == "FGSM":
-                        adv_arr = fgsm_attack(target_model, preprocessed_img, label_idx, epsilon)
+                        adv_arr = fgsm_attack(target_model, preprocessed_img, label_idx, epsilon, target_preprocess_fn)
                     elif attack_option == "PGD":
-                        adv_arr = pgd_attack(target_model, preprocessed_img, label_idx, epsilon, max_iter, alpha)
+                        adv_arr = pgd_attack(target_model, preprocessed_img, label_idx, epsilon, max_iter, alpha, target_preprocess_fn)
                         
                     # Calculate noise map
                     noise_map = adv_arr - preprocessed_img
                     
                     # Run predictions on perturbed image
-                    lbl_non_adv, conf_non_adv, _ = predict_image(model_non_robust, adv_arr)
-                    lbl_fgsm_adv, conf_fgsm_adv, _ = predict_image(model_fgsm, adv_arr)
-                    lbl_pgd_adv, conf_pgd_adv, _ = predict_image(model_pgd, adv_arr)
+                    lbl_non_adv, conf_non_adv, _ = predict_image(model_non_robust, get_model_input(adv_arr, architecture, "Non-Robust Model"))
+                    lbl_fgsm_adv, conf_fgsm_adv, _ = predict_image(model_fgsm, get_model_input(adv_arr, architecture, "FGSM-Robust Model"))
+                    lbl_pgd_adv, conf_pgd_adv, _ = predict_image(model_pgd, get_model_input(adv_arr, architecture, "PGD-Robust Model"))
                     
                     st.session_state.adv_image = adv_arr
                     st.session_state.noise_map = noise_map
